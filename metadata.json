@@ -1,0 +1,6 @@
+{
+  "name": "Sci-Fi Tactical Recon",
+  "description": "Futuristic turn-based tactical rogue-lite featuring customizable mechs, A* pathfinding, line-of-sight raycasting, and sector campaign traversal in XR.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
