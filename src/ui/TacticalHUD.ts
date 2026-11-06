@@ -11,6 +11,7 @@ export class TacticalHUD {
   private campaign: CampaignManager;
   private isDockCollapsed: boolean = false;
   private onDeployMission?: (nodeId: string) => void;
+  public onToggleCam?: () => void;
 
   constructor(fsm: CombatFSM, campaign: CampaignManager, onDeployMission?: (nodeId: string) => void) {
     this.fsm = fsm;
@@ -80,6 +81,7 @@ export class TacticalHUD {
             <span>⚙️ SCRAP</span>
             <strong>${this.campaign.scrap}</strong>
           </div>
+          <button id="btn-toggle-cam" class="hud-btn secondary" title="Toggle Mouse Look / Free Cam (Hotkey: F)">🎮 FREE CAM [F]</button>
           <button id="btn-open-map" class="hud-btn secondary" title="View Sector Route">🗺️ MAP</button>
           <button id="btn-open-squad" class="hud-btn secondary" title="Squad Management & Repairs">👥 SQUAD</button>
           <button id="btn-toggle-sound" class="hud-btn secondary" title="Toggle Audio">${sound.isMuted ? '🔇' : '🔊'}</button>
@@ -505,6 +507,11 @@ export class TacticalHUD {
     document.getElementById('btn-toggle-sound')?.addEventListener('click', () => {
       sound.toggleMute();
       this.render();
+    });
+
+    // Free Cam toggle
+    document.getElementById('btn-toggle-cam')?.addEventListener('click', () => {
+      this.onToggleCam?.();
     });
 
     // Sector Map Modal
