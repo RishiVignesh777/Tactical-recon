@@ -214,7 +214,7 @@ export class LineOfSight {
         for (let dz = -sightRadius; dz <= sightRadius; dz++) {
           const tx = unit.x + dx;
           const tz = unit.z + dz;
-          if (tx < 0 || tx >= 10 || tz < 0 || tz >= 10) continue;
+          if (tx < 0 || tx >= 12 || tz < 0 || tz >= 12) continue;
 
           const dist = Math.hypot(dx, dz);
           if (dist <= sightRadius) {

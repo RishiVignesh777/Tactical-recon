@@ -5,6 +5,7 @@ import { CampaignManager } from './systems/CampaignManager';
 import { CombatFSM } from './systems/CombatFSM';
 import { TacticalHUD } from './ui/TacticalHUD';
 import { MechBuilder } from './models/MechBuilder';
+import { Pathfinding } from './systems/Pathfinding';
 import { sound } from './systems/AudioSynth';
 import { GridCoord } from './types';
 
@@ -20,8 +21,6 @@ class TacticalReconScene extends xb.Script {
 
   private raycaster: THREE.Raycaster = new THREE.Raycaster();
   private pointer: THREE.Vector2 = new THREE.Vector2();
-  private gridPlane: THREE.Plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-  private hoveredTile: GridCoord | null = null;
   private isTitleScreen: boolean = true;
   private cameraAngle: number = 0;
   private targetCameraAngle: number = 0;
@@ -41,9 +40,9 @@ class TacticalReconScene extends xb.Script {
     this.add(this.grid.group);
     this.add(this.unitMeshesGroup);
 
-    // Position tactical arena comfortably in front of user in XR/Desktop
-    // In XR, users typically view tabletop content 1.2m high and 1.5m - 2.5m away.
-    this.grid.group.position.set(-4.5, 0.7, -4.5);
+    // Center 12x12 arena comfortably in front of user in XR/Desktop
+    const centerOffset = (TacticalGrid.GRID_WIDTH * TacticalGrid.TILE_SIZE) / 2 - 0.5;
+    this.grid.group.position.set(-centerOffset, 0.4, -6.2);
     this.unitMeshesGroup.position.copy(this.grid.group.position);
 
     // Initialize HUD overlay
@@ -54,31 +53,35 @@ class TacticalReconScene extends xb.Script {
     // Start title screen
     this.renderTitleScreen();
 
-    // Mouse and Keyboard input listeners for desktop simulator
+    // Desktop mouse, wheel and keyboard controls
     this.setupDesktopControls();
   }
 
   private setupLighting() {
     // Cool sky/ground ambient fill
-    const hemiLight = new THREE.HemisphereLight(0x7090b0, 0x141e30, 2.5);
+    const hemiLight = new THREE.HemisphereLight(0x7090b0, 0x0b0f19, 2.5);
     this.add(hemiLight);
 
-    // Warm key directional light with soft shadows
-    const dirLight = new THREE.DirectionalLight(0xfff5e6, 2.2);
-    dirLight.position.set(5, 12, 7);
+    // Key directional light with soft shadows
+    const dirLight = new THREE.DirectionalLight(0xfff5e6, 2.4);
+    dirLight.position.set(6, 14, 8);
     dirLight.castShadow = true;
     dirLight.shadow.mapSize.set(1024, 1024);
     dirLight.shadow.bias = -0.0005;
     this.add(dirLight);
 
-    // Neon accent rim light
-    const rimLight = new THREE.DirectionalLight(0x00f0ff, 1.2);
-    rimLight.position.set(-8, 6, -5);
-    this.add(rimLight);
+    // Neon Emerald & Cyan Rim Lights
+    const cyanRim = new THREE.DirectionalLight(0x06b6d4, 1.4);
+    cyanRim.position.set(-9, 7, -6);
+    this.add(cyanRim);
+
+    const emeraldRim = new THREE.DirectionalLight(0x10b981, 1.0);
+    emeraldRim.position.set(9, 5, -6);
+    this.add(emeraldRim);
 
     // Horizon fog
     if (xb.core.scene) {
-      xb.core.scene.fog = new THREE.FogExp2(0x070b14, 0.04);
+      xb.core.scene.fog = new THREE.FogExp2(0x070b14, 0.035);
     }
   }
 
@@ -129,16 +132,16 @@ class TacticalReconScene extends xb.Script {
     const node = this.campaign.sectorNodes.get(nodeId);
     const nodeType = node ? node.type : 'skirmish';
 
-    // Generate 3D grid layout
+    // 1. Generate 3D grid layout
     this.grid.generateMap(nodeType);
 
-    // Start combat FSM (populates units list with squad and enemies)
+    // 2. Start combat FSM (populates units list with squad and enemies)
     this.fsm.initMission(this.campaign.persistentSquad, nodeType);
 
-    // Spawn 3D meshes for all units (player squad + enemies)
+    // 3. Spawn 3D meshes for all units (player squad + enemies)
     this.spawnMissionMeshes();
 
-    // Update HUD
+    // 4. Update HUD
     this.hud?.render();
   }
 
@@ -151,9 +154,10 @@ class TacticalReconScene extends xb.Script {
     // Create 3D meshes for all units in combat
     this.fsm.units.forEach((u) => {
       const mesh = MechBuilder.buildUnitMesh(u);
+      mesh.userData = { unitId: u.id };
       const tile = this.grid.gridTiles.get(`${u.x},${u.z}`);
       const h = tile ? tile.height : 0;
-      mesh.position.set(u.x, h, u.z);
+      mesh.position.set(u.x * TacticalGrid.TILE_SIZE, h, u.z * TacticalGrid.TILE_SIZE);
       u.mesh = mesh;
       this.unitMeshesGroup.add(mesh);
     });
@@ -194,28 +198,39 @@ class TacticalReconScene extends xb.Script {
     this.pointer.y = -(event.clientY / window.innerHeight) * 2 + 1;
   }
 
+  /**
+   * Performs direct raycast against interactive tile meshes and unit meshes.
+   * 100% reliable across any camera angle, rotation or distance.
+   */
   private getGridCoordUnderPointer(): GridCoord | null {
-    if (!xb.core.camera) return null;
+    if (!xb.core.camera || this.grid.interactiveTileMeshes.length === 0) return null;
 
     this.raycaster.setFromCamera(this.pointer, xb.core.camera);
 
-    // Intersect plane at the grid height
-    const worldPoint = new THREE.Vector3();
-    const hit = this.raycaster.ray.intersectPlane(
-      new THREE.Plane(new THREE.Vector3(0, 1, 0), -this.grid.group.position.y),
-      worldPoint
-    );
-
-    if (!hit) return null;
-
-    // Convert world point to grid local coordinates
-    const local = worldPoint.sub(this.grid.group.position);
-    const gx = Math.round(local.x / TacticalGrid.TILE_SIZE);
-    const gz = Math.round(local.z / TacticalGrid.TILE_SIZE);
-
-    if (gx >= 0 && gx < TacticalGrid.GRID_WIDTH && gz >= 0 && gz < TacticalGrid.GRID_DEPTH) {
-      return { x: gx, z: gz };
+    // First check if an interactive tile mesh was hit
+    const intersects = this.raycaster.intersectObjects(this.grid.interactiveTileMeshes, false);
+    if (intersects.length > 0) {
+      const hit = intersects[0];
+      const gx = hit.object.userData.gridX;
+      const gz = hit.object.userData.gridZ;
+      if (typeof gx === 'number' && typeof gz === 'number') {
+        return { x: gx, z: gz };
+      }
     }
+
+    // Fallback: check unit mesh hits
+    const unitIntersects = this.raycaster.intersectObjects(this.unitMeshesGroup.children, true);
+    if (unitIntersects.length > 0) {
+      let obj: THREE.Object3D | null = unitIntersects[0].object;
+      while (obj && obj !== this.unitMeshesGroup) {
+        if (obj.userData?.unitId) {
+          const unit = this.fsm.units.find((u) => u.id === obj!.userData.unitId);
+          if (unit) return { x: unit.x, z: unit.z };
+        }
+        obj = obj.parent;
+      }
+    }
+
     return null;
   }
 
@@ -223,20 +238,22 @@ class TacticalReconScene extends xb.Script {
     if (this.isTitleScreen || this.fsm.state !== 'PLAYER_TURN') return;
 
     const coord = this.getGridCoordUnderPointer();
-    this.hoveredTile = coord;
     this.grid.setHoverTile(coord);
 
     const activeUnit = this.fsm.getSelectedUnit();
     if (activeUnit && this.fsm.currentAction === 'MOVE' && coord) {
-      const reachable = this.fsm.grid.gridTiles.get(`${coord.x},${coord.z}`);
-      if (reachable && reachable.type !== 'high_cover') {
-        // Draw path preview line
-        const path = this.fsm.grid.gridTiles;
-        const computedPath = [
-          { x: activeUnit.x, z: activeUnit.z },
-          { x: coord.x, z: coord.z },
-        ];
-        this.grid.drawPathPreview(computedPath);
+      const reachable = Pathfinding.getReachableTiles(
+        { x: activeUnit.x, z: activeUnit.z },
+        activeUnit.ap,
+        activeUnit.moveRange,
+        this.fsm.grid.gridTiles,
+        this.fsm.units,
+        activeUnit.id
+      );
+
+      const targetPath = reachable.get(`${coord.x},${coord.z}`);
+      if (targetPath) {
+        this.grid.drawPathPreview(targetPath.path);
       } else {
         this.grid.pathLine.visible = false;
       }
@@ -259,24 +276,17 @@ class TacticalReconScene extends xb.Script {
     const controller = event.source.controller;
     if (!controller) return;
 
-    // Raycast from controller forward vector
     const controllerPos = new THREE.Vector3();
     controller.getWorldPosition(controllerPos);
     const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(controller.quaternion);
 
     this.raycaster.set(controllerPos, forward);
-    const worldPoint = new THREE.Vector3();
-    const hit = this.raycaster.ray.intersectPlane(
-      new THREE.Plane(new THREE.Vector3(0, 1, 0), -this.grid.group.position.y),
-      worldPoint
-    );
-
-    if (hit) {
-      const local = worldPoint.sub(this.grid.group.position);
-      const gx = Math.round(local.x / TacticalGrid.TILE_SIZE);
-      const gz = Math.round(local.z / TacticalGrid.TILE_SIZE);
-
-      if (gx >= 0 && gx < TacticalGrid.GRID_WIDTH && gz >= 0 && gz < TacticalGrid.GRID_DEPTH) {
+    const intersects = this.raycaster.intersectObjects(this.grid.interactiveTileMeshes, false);
+    if (intersects.length > 0) {
+      const hit = intersects[0];
+      const gx = hit.object.userData.gridX;
+      const gz = hit.object.userData.gridZ;
+      if (typeof gx === 'number' && typeof gz === 'number') {
         void this.fsm.handleTileClick({ x: gx, z: gz });
       }
     }

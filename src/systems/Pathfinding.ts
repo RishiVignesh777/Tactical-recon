@@ -10,8 +10,8 @@ export interface PathNode {
 }
 
 export class Pathfinding {
-  public static readonly GRID_WIDTH = 10;
-  public static readonly GRID_DEPTH = 10;
+  public static readonly GRID_WIDTH = 12;
+  public static readonly GRID_DEPTH = 12;
 
   public static isWithinBounds(x: number, z: number): boolean {
     return x >= 0 && x < this.GRID_WIDTH && z >= 0 && z < this.GRID_DEPTH;
@@ -21,11 +21,11 @@ export class Pathfinding {
     if (!tile) return 999;
     switch (tile.type) {
       case 'high_cover':
-        return 999; // Impassable
+        return 999; // Impassable full cover
       case 'hazard':
         return 2.0; // Slows movement & damages
       case 'low_cover':
-        return 1.2;
+        return 1.3; // Half cover
       case 'elevation':
         return 1.0;
       default:
@@ -40,26 +40,29 @@ export class Pathfinding {
 
   /**
    * Finds the optimal path from start to goal using A*.
-   * If goal is occupied or blocked, returns empty array.
+   * If allowGoalOccupied is true, the goal itself can be occupied (used for finding path toward a target).
    */
   public static findPath(
     start: GridCoord,
     goal: GridCoord,
     grid: Map<string, TileData>,
     units: Unit[],
-    movingUnitId: string
+    movingUnitId: string,
+    allowGoalOccupied = false
   ): GridCoord[] {
     if (!this.isWithinBounds(goal.x, goal.z)) return [];
-    if (start.x === goal.x && start.z === goal.z) return [];
+    if (start.x === goal.x && start.z === goal.z) return [{ x: start.x, z: start.z }];
 
     const goalTile = grid.get(`${goal.x},${goal.z}`);
     if (!goalTile || goalTile.type === 'high_cover') return [];
 
     // Check if goal is occupied by any living unit
-    const isGoalOccupied = units.some(
-      (u) => !u.isDead && u.id !== movingUnitId && u.x === goal.x && u.z === goal.z
-    );
-    if (isGoalOccupied) return [];
+    if (!allowGoalOccupied) {
+      const isGoalOccupied = units.some(
+        (u) => !u.isDead && u.id !== movingUnitId && u.x === goal.x && u.z === goal.z
+      );
+      if (isGoalOccupied) return [];
+    }
 
     const openSet: PathNode[] = [];
     const closedSet = new Set<string>();
@@ -82,7 +85,7 @@ export class Pathfinding {
     ];
 
     while (openSet.length > 0) {
-      // Get lowest f score
+      // Lowest f score
       openSet.sort((a, b) => a.f - b.f);
       const current = openSet.shift()!;
       const key = `${current.x},${current.z}`;
@@ -109,19 +112,24 @@ export class Pathfinding {
 
         const tile = grid.get(nKey);
         const cost = this.getTileCost(tile);
-        if (cost >= 900) continue; // High cover/wall
+        if (cost >= 900) continue; // Impassable wall / high cover
 
-        // Impassable if enemy unit occupies the intermediate tile
+        // Check unit collision
         const movingUnit = units.find((u) => u.id === movingUnitId);
         const occupiedUnit = units.find(
           (u) => !u.isDead && u.x === nx && u.z === nz && u.id !== movingUnitId
         );
 
         if (occupiedUnit) {
-          // Cannot traverse through enemy units
-          if (movingUnit && occupiedUnit.team !== movingUnit.team) continue;
-          // If destination tile is occupied by an ally, cannot stop there
-          if (nx === goal.x && nz === goal.z) continue;
+          // If intermediate tile is occupied by an enemy, cannot pass through
+          if (movingUnit && occupiedUnit.team !== movingUnit.team) {
+            // Allow if this is the final goal and allowGoalOccupied is true
+            if (!(allowGoalOccupied && nx === goal.x && nz === goal.z)) {
+              continue;
+            }
+          } else if (!allowGoalOccupied && nx === goal.x && nz === goal.z) {
+            continue; // Cannot stop on ally tile
+          }
         }
 
         const tentativeG = current.g + cost;
@@ -147,6 +155,42 @@ export class Pathfinding {
     }
 
     return [];
+  }
+
+  /**
+   * Finds the best path towards a target unit, stopping at an unoccupied tile in attack range.
+   */
+  public static findPathTowardsTarget(
+    start: GridCoord,
+    target: GridCoord,
+    attackRange: number,
+    grid: Map<string, TileData>,
+    units: Unit[],
+    movingUnitId: string
+  ): GridCoord[] {
+    // 1. If already within attack range, no need to move
+    const currentDist = Math.hypot(target.x - start.x, target.z - start.z);
+    if (currentDist <= attackRange) {
+      return [{ x: start.x, z: start.z }];
+    }
+
+    // 2. Find path directly towards target allowing target tile as goal
+    const fullPath = this.findPath(start, target, grid, units, movingUnitId, true);
+    if (fullPath.length <= 1) return [];
+
+    // 3. Remove the target's occupied tile from the end of the path
+    const validPath: GridCoord[] = [];
+    for (const step of fullPath) {
+      const isOccupiedByOther = units.some(
+        (u) => !u.isDead && u.id !== movingUnitId && u.x === step.x && u.z === step.z
+      );
+      if (isOccupiedByOther && (step.x !== start.x || step.z !== start.z)) {
+        break; // Stop right before the occupied tile
+      }
+      validPath.push(step);
+    }
+
+    return validPath;
   }
 
   /**

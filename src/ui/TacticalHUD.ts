@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { CampaignManager } from '../systems/CampaignManager';
 import { CombatFSM } from '../systems/CombatFSM';
 import { sound } from '../systems/AudioSynth';
+import { LineOfSight } from '../systems/LineOfSight';
 import { CombatLogEntry, SelectedAction, Unit } from '../types';
 
 export class TacticalHUD {
@@ -182,11 +183,25 @@ export class TacticalHUD {
     const selected = this.fsm.getSelectedUnit();
     let hitChanceStr = '--';
     let coverStr = 'None';
+    let canAttack = false;
 
     if (selected) {
-      const dist = Math.hypot(target.x - selected.x, target.z - selected.z);
-      if (dist <= selected.attackRange) {
-        hitChanceStr = '75%';
+      const evalResult = LineOfSight.evaluateCombat(selected, target, this.fsm.grid.gridTiles);
+      if (evalResult.hasLineOfSight && evalResult.distance <= selected.attackRange) {
+        hitChanceStr = `${evalResult.hitChance}%`;
+        coverStr =
+          evalResult.coverType === 'high'
+            ? 'High Cover (-50%)'
+            : evalResult.coverType === 'low'
+              ? 'Half Cover (-25%)'
+              : 'Flanked (No Cover)';
+        canAttack = selected.ap >= 2 && this.fsm.state === 'PLAYER_TURN' && !this.fsm.isBusyAnimating;
+      } else if (!evalResult.hasLineOfSight) {
+        hitChanceStr = 'Blocked';
+        coverStr = 'LoS Obstructed';
+      } else {
+        hitChanceStr = 'Out of Range';
+        coverStr = `${Math.round(evalResult.distance)} tiles away (Max: ${selected.attackRange})`;
       }
     }
 
@@ -206,9 +221,22 @@ export class TacticalHUD {
           <strong>${target.shields} / ${target.maxShields}</strong>
         </div>
         <div class="inspector-stats-row">
-          <span>ARMOR / COVER:</span>
-          <strong>${target.armor} DEF // ${coverStr}</strong>
+          <span>COVER STATUS:</span>
+          <strong style="color: ${coverStr.includes('Flanked') ? 'var(--neon-emerald)' : 'inherit'};">${coverStr}</strong>
         </div>
+        <div class="inspector-stats-row">
+          <span>HIT ACCURACY:</span>
+          <strong style="color: var(--neon-cyan);">${hitChanceStr}</strong>
+        </div>
+        ${
+          canAttack
+            ? `
+          <button id="btn-engage-target" class="hud-btn danger" style="width: 100%; margin-top: 8px; font-weight: 800;">
+            💥 ENGAGE TARGET (2 AP)
+          </button>
+        `
+            : ''
+        }
       </div>
     `;
   }
@@ -436,11 +464,34 @@ export class TacticalHUD {
       void this.fsm.endTurn();
     });
 
+    // Engage Target Button in Target Inspector
+    document.getElementById('btn-engage-target')?.addEventListener('click', () => {
+      const selected = this.fsm.getSelectedUnit();
+      const target = this.fsm.units.find((u) => u.id === this.fsm.targetUnitId && !u.isDead);
+      if (selected && target) {
+        void this.fsm.executeAttackAction(selected, target);
+      }
+    });
+
     // Unit Queue click
     document.querySelectorAll('.unit-queue-pill').forEach((pill) => {
       pill.addEventListener('click', (e) => {
         const id = (e.currentTarget as HTMLElement).dataset.unitId;
-        if (id) this.fsm.selectUnit(id);
+        if (id) {
+          const clickedUnit = this.fsm.units.find((u) => u.id === id);
+          const selectedUnit = this.fsm.getSelectedUnit();
+          if (
+            clickedUnit &&
+            clickedUnit.team === 'enemy' &&
+            selectedUnit &&
+            this.fsm.currentAction === 'ATTACK'
+          ) {
+            void this.fsm.executeAttackAction(selectedUnit, clickedUnit);
+          } else {
+            this.fsm.selectUnit(id);
+            this.render();
+          }
+        }
       });
     });
 
