@@ -1,100 +1,96 @@
-import * as THREE from 'three';
-import * as xb from 'xrblocks';
-import { TacticalGrid } from './scenes/TacticalGrid';
+import { TacticalGrid2D } from './scenes/TacticalGrid2D';
+import { Camera2D } from './systems/Camera2D';
+import { Renderer2D } from './scenes/Renderer2D';
+import { CombatFSM2D } from './systems/CombatFSM2D';
 import { CampaignManager } from './systems/CampaignManager';
-import { CombatFSM } from './systems/CombatFSM';
 import { TacticalHUD } from './ui/TacticalHUD';
-import { MechBuilder } from './models/MechBuilder';
-import { Pathfinding } from './systems/Pathfinding';
-import { FreeCameraController } from './systems/FreeCameraController';
+import { Pathfinding2D } from './systems/Pathfinding2D';
 import { sound } from './systems/AudioSynth';
 import { GridCoord } from './types';
 
 /**
- * Sci-Fi Tactical Recon - WebXR Tactical Rogue-lite Experience
- * Supports 6-DOF Free Camera WASD flight and smooth mouse-look blended into the screen.
+ * Sci-Fi Tactical Recon - 2D Top-Down Tactical Strategy Engine
+ * Deterministic HTML5 Canvas 2D rendering pipeline with procedural vector graphics,
+ * 2D orthographic camera, Bresenham LoS, and A* pathfinding.
  */
-class TacticalReconScene extends xb.Script {
-  public grid: TacticalGrid;
+class TacticalReconGame {
+  private canvas: HTMLCanvasElement;
+  public camera: Camera2D;
+  public grid: TacticalGrid2D;
+  public renderer: Renderer2D;
+  public fsm: CombatFSM2D;
   public campaign: CampaignManager;
-  public fsm: CombatFSM;
   public hud: TacticalHUD | null = null;
-  public freeCam: FreeCameraController;
-  public unitMeshesGroup: THREE.Group = new THREE.Group();
 
-  private raycaster: THREE.Raycaster = new THREE.Raycaster();
-  private pointer: THREE.Vector2 = new THREE.Vector2();
   private isTitleScreen: boolean = true;
+  private lastTime: number = performance.now();
+
+  // Mouse interaction state
+  private dragStartX: number = 0;
+  private dragStartY: number = 0;
+  private isPointerDown: boolean = false;
+  private isMouseDragging: boolean = false;
 
   constructor() {
-    super();
-    this.grid = new TacticalGrid();
+    const container = document.getElementById('game-container')!;
+    container.innerHTML = '';
+
+    // Create primary 2D canvas
+    this.canvas = document.createElement('canvas');
+    this.canvas.id = 'tactical-canvas';
+    this.canvas.style.display = 'block';
+    this.canvas.style.width = '100vw';
+    this.canvas.style.height = '100vh';
+    this.canvas.style.position = 'absolute';
+    this.canvas.style.top = '0';
+    this.canvas.style.left = '0';
+    this.canvas.style.zIndex = '1';
+    container.appendChild(this.canvas);
+
+    this.resizeCanvas();
+
+    // Initialize core subsystems
+    this.camera = new Camera2D();
+    this.grid = new TacticalGrid2D();
+    this.renderer = new Renderer2D(this.canvas, this.camera, this.grid);
     this.campaign = new CampaignManager();
-    this.fsm = new CombatFSM(this.grid);
-    this.freeCam = new FreeCameraController();
-  }
+    this.fsm = new CombatFSM2D(this.grid);
 
-  public init() {
-    // Studio PBR lighting & atmosphere
-    this.setupLighting();
+    this.fsm.setRendererAndCamera(this.renderer, this.camera);
 
-    // Add 3D grid and units container
-    this.add(this.grid.group);
-    this.add(this.unitMeshesGroup);
-
-    // Center 12x12 arena at (0, 0, 0) in 3D world space
-    const centerOffset = (TacticalGrid.GRID_WIDTH * TacticalGrid.TILE_SIZE) / 2 - 0.5;
-    this.grid.group.position.set(-centerOffset, 0, -centerOffset);
-    this.unitMeshesGroup.position.copy(this.grid.group.position);
-
-    // Initialize HUD overlay
+    // Initialize Tactical HUD
     this.hud = new TacticalHUD(this.fsm, this.campaign, (nodeId) => {
       this.deployMission(nodeId);
     });
 
-    // Wire up Free Cam button in HUD
     this.hud.onToggleCam = () => {
-      this.freeCam.toggleLock();
+      // Recenter camera on selected unit or grid
+      const u = this.fsm.getSelectedUnit();
+      if (u) {
+        this.camera.centerOn((u.x + 0.5) * TacticalGrid2D.TILE_SIZE, (u.y + 0.5) * TacticalGrid2D.TILE_SIZE);
+      } else {
+        this.camera.centerOnGrid(TacticalGrid2D.GRID_WIDTH, TacticalGrid2D.GRID_HEIGHT, TacticalGrid2D.TILE_SIZE);
+      }
     };
 
-    // Initialize free camera controller once camera is available
-    if (xb.core.camera) {
-      this.freeCam.init(xb.core.camera, document.body);
-    }
+    // Center camera on grid initially
+    this.camera.centerOnGrid(TacticalGrid2D.GRID_WIDTH, TacticalGrid2D.GRID_HEIGHT, TacticalGrid2D.TILE_SIZE);
 
-    // Start title screen
+    (window as unknown as { game: TacticalReconGame }).game = this;
+
+    // Bind inputs
+    this.bindEvents();
+
+    // Show Title Screen
     this.renderTitleScreen();
 
-    // Desktop mouse, wheel, keyboard, and action hotkeys
-    this.setupDesktopControls();
+    // Start 60 FPS Game Loop
+    requestAnimationFrame((now) => this.gameLoop(now));
   }
 
-  private setupLighting() {
-    // Cool sky/ground ambient fill
-    const hemiLight = new THREE.HemisphereLight(0x7090b0, 0x0b0f19, 2.5);
-    this.add(hemiLight);
-
-    // Key directional light with soft shadows
-    const dirLight = new THREE.DirectionalLight(0xfff5e6, 2.4);
-    dirLight.position.set(6, 14, 8);
-    dirLight.castShadow = true;
-    dirLight.shadow.mapSize.set(1024, 1024);
-    dirLight.shadow.bias = -0.0005;
-    this.add(dirLight);
-
-    // Neon Emerald & Cyan Rim Lights
-    const cyanRim = new THREE.DirectionalLight(0x06b6d4, 1.4);
-    cyanRim.position.set(-9, 7, -6);
-    this.add(cyanRim);
-
-    const emeraldRim = new THREE.DirectionalLight(0x10b981, 1.0);
-    emeraldRim.position.set(9, 5, -6);
-    this.add(emeraldRim);
-
-    // Horizon fog
-    if (xb.core.scene) {
-      xb.core.scene.fog = new THREE.FogExp2(0x070b14, 0.035);
-    }
+  private resizeCanvas() {
+    this.canvas.width = window.innerWidth;
+    this.canvas.height = window.innerHeight;
   }
 
   private renderTitleScreen() {
@@ -107,8 +103,8 @@ class TacticalReconScene extends xb.Script {
         <div style="font-family: var(--font-display); font-size: 13px; color: var(--neon-cyan); letter-spacing: 0.4em;">
           // ORBITAL TACTICAL COMMAND //
         </div>
-        <div class="game-title-main">SCI-FI TACTICAL RECON</div>
-        <div class="game-subtitle">Turn-Based Rogue-Lite Operations</div>
+        <div class="game-title-main">SCI-FI TACTICAL RECON 2D</div>
+        <div class="game-subtitle">Turn-Based Tactical Grid Operations</div>
       </div>
 
       <div class="title-actions-row">
@@ -118,19 +114,15 @@ class TacticalReconScene extends xb.Script {
       </div>
 
       <div class="controls-hint-bar" style="flex-wrap: wrap; justify-content: center;">
-        <span>🖱️ Mouse: Move Directions / Aim</span>
+        <span>🖱️ Click: Select Unit / Move / Attack</span>
         <span>•</span>
-        <span>⌨️ WASD: Fly & Move Freely</span>
+        <span>🖱️ Drag / WASD: Pan Camera</span>
         <span>•</span>
-        <span>Shift: Sprint Boost</span>
+        <span>Wheel: Zoom Viewport</span>
         <span>•</span>
-        <span>Space/C: Ascend/Descend</span>
+        <span>Space: End Turn</span>
         <span>•</span>
-        <span>F: Toggle Mouse Lock</span>
-      </div>
-
-      <div class="xr-preview-banner">
-        The XR app is best viewed in an Android XR device like Galaxy XR or XREAL AURA. On desktop, we provide you a simulated environment for previewing the app.
+        <span>1-4: Action Hotkeys</span>
       </div>
     `;
 
@@ -141,11 +133,6 @@ class TacticalReconScene extends xb.Script {
       titleContainer.remove();
       this.isTitleScreen = false;
       this.deployMission('node_0');
-
-      // Auto-request pointer lock for blended mouse look experience
-      setTimeout(() => {
-        this.freeCam.requestLock();
-      }, 300);
     });
   }
 
@@ -153,249 +140,223 @@ class TacticalReconScene extends xb.Script {
     const node = this.campaign.sectorNodes.get(nodeId);
     const nodeType = node ? node.type : 'skirmish';
 
-    // 1. Generate 3D grid layout
+    // 1. Generate 2D grid matrix
     this.grid.generateMap(nodeType);
 
-    // 2. Start combat FSM (populates units list with squad and enemies)
+    // 2. Initialize combat state machine
     this.fsm.initMission(this.campaign.persistentSquad, nodeType);
 
-    // 3. Spawn 3D meshes for all units (player squad + enemies)
-    this.spawnMissionMeshes();
+    // 3. Center camera on squad
+    this.camera.centerOnGrid(TacticalGrid2D.GRID_WIDTH, TacticalGrid2D.GRID_HEIGHT, TacticalGrid2D.TILE_SIZE);
 
     // 4. Update HUD
     this.hud?.render();
   }
 
-  private spawnMissionMeshes() {
-    // Clear old unit meshes
-    while (this.unitMeshesGroup.children.length > 0) {
-      this.unitMeshesGroup.remove(this.unitMeshesGroup.children[0]);
-    }
-
-    // Create 3D meshes for all units in combat
-    this.fsm.units.forEach((u) => {
-      const mesh = MechBuilder.buildUnitMesh(u);
-      mesh.userData = { unitId: u.id };
-      const tile = this.grid.gridTiles.get(`${u.x},${u.z}`);
-      const h = tile ? tile.height : 0;
-      mesh.position.set(u.x * TacticalGrid.TILE_SIZE, h, u.z * TacticalGrid.TILE_SIZE);
-      u.mesh = mesh;
-      this.unitMeshesGroup.add(mesh);
-    });
-  }
-
-  private setupDesktopControls() {
-    window.addEventListener('pointermove', (event) => {
-      if (!this.freeCam.isPointerLocked) {
-        this.updatePointerCoords(event);
-      }
-      this.handleHover();
+  private bindEvents() {
+    window.addEventListener('resize', () => {
+      this.resizeCanvas();
+      this.camera.updateViewport();
     });
 
-    window.addEventListener('pointerdown', (event) => {
-      // Don't trigger if clicked on HUD
-      if ((event.target as HTMLElement).closest('.hud-interactive') || this.isTitleScreen) {
-        return;
-      }
+    // Mouse Pointer Events
+    this.canvas.addEventListener('pointerdown', (e: PointerEvent) => {
+      if (this.isTitleScreen) return;
 
-      if (!this.freeCam.isPointerLocked) {
-        this.updatePointerCoords(event);
+      this.isPointerDown = true;
+      this.isMouseDragging = false;
+      this.dragStartX = e.clientX;
+      this.dragStartY = e.clientY;
+
+      // Start drag panning on right-click or middle-click immediately
+      if (e.button === 1 || e.button === 2) {
+        this.camera.startDrag(e.clientX, e.clientY);
       }
-      this.handleClick();
     });
 
-    // Hotkeys for rapid tactical command
-    window.addEventListener('keydown', (e) => {
+    window.addEventListener('pointermove', (e: PointerEvent) => {
+      if (this.isTitleScreen) return;
+
+      if (this.isPointerDown) {
+        const dx = Math.abs(e.clientX - this.dragStartX);
+        const dy = Math.abs(e.clientY - this.dragStartY);
+        if (dx > 5 || dy > 5) {
+          this.isMouseDragging = true;
+          if (!this.camera.isDragging) {
+            this.camera.startDrag(e.clientX, e.clientY);
+          }
+        }
+      }
+
+      if (this.camera.isDragging) {
+        this.camera.drag(e.clientX, e.clientY);
+      } else {
+        // Tile hover detection
+        const coord = this.camera.screenToGrid(e.clientX, e.clientY, TacticalGrid2D.TILE_SIZE);
+        this.grid.setHoverTile(coord);
+
+        // Update path preview if in MOVE mode
+        const activeUnit = this.fsm.getSelectedUnit();
+        if (activeUnit && this.fsm.currentAction === 'MOVE' && coord && this.grid.isValid(coord.x, coord.y)) {
+          const key = `${coord.x},${coord.y}`;
+          const pathInfo = this.grid.reachableTiles.get(key);
+          if (pathInfo) {
+            this.grid.setPreviewPath(pathInfo.path);
+          } else {
+            this.grid.clearPreviewPath();
+          }
+        } else {
+          this.grid.clearPreviewPath();
+        }
+      }
+    });
+
+    window.addEventListener('pointerup', (e: PointerEvent) => {
+      if (this.isTitleScreen) return;
+
+      if (this.camera.isDragging) {
+        this.camera.endDrag();
+      }
+
+      // If clicked without dragging and not clicking on HUD element, handle tile click
+      if (this.isPointerDown && !this.isMouseDragging && e.button === 0) {
+        const target = e.target as HTMLElement;
+        if (!target.closest('.hud-interactive')) {
+          const coord = this.camera.screenToGrid(e.clientX, e.clientY, TacticalGrid2D.TILE_SIZE);
+          if (coord && this.grid.isValid(coord.x, coord.y)) {
+            void this.fsm.handleTileClick(coord);
+          }
+        }
+      }
+
+      this.isPointerDown = false;
+      this.isMouseDragging = false;
+    });
+
+    // Zoom on wheel
+    this.canvas.addEventListener('wheel', (e: WheelEvent) => {
+      if (this.isTitleScreen) return;
+      e.preventDefault();
+      this.camera.handleZoom(e.deltaY, e.clientX, e.clientY);
+    }, { passive: false });
+
+    // Prevent context menu on right click to allow smooth right-click drag
+    this.canvas.addEventListener('contextmenu', (e: MouseEvent) => {
+      e.preventDefault();
+    });
+
+    // Keyboard WASD / Action hotkeys
+    window.addEventListener('keydown', (e: KeyboardEvent) => {
       if (this.isTitleScreen) return;
       if ((e.target as HTMLElement).tagName === 'INPUT') return;
 
-      const activeUnit = this.fsm.getSelectedUnit();
-
-      // Action Hotkeys: 1 = Move, 2 = Fire/Attack, 3/4 = Skills, Enter = End Turn
-      if (e.code === 'Digit1') {
-        this.fsm.setAction('MOVE');
-        this.hud?.render();
-      } else if (e.code === 'Digit2') {
-        this.fsm.setAction('ATTACK');
-        this.hud?.render();
-      } else if (e.code === 'Digit3' && activeUnit?.abilities[0]) {
-        this.fsm.setAction('ABILITY_1');
-        this.hud?.render();
-      } else if (e.code === 'Digit4' && activeUnit?.abilities[1]) {
-        this.fsm.setAction('ABILITY_2');
-        this.hud?.render();
-      } else if (e.code === 'Enter') {
-        if (this.fsm.state === 'PLAYER_TURN') {
-          void this.fsm.endTurn();
+      // WASD / Arrow camera panning
+      switch (e.code) {
+        case 'KeyW':
+        case 'ArrowUp':
+          this.camera.keys.up = true;
+          break;
+        case 'KeyS':
+        case 'ArrowDown':
+          this.camera.keys.down = true;
+          break;
+        case 'KeyA':
+        case 'ArrowLeft':
+          this.camera.keys.left = true;
+          break;
+        case 'KeyD':
+        case 'ArrowRight':
+          this.camera.keys.right = true;
+          break;
+        case 'Digit1':
+          this.fsm.setAction('MOVE');
+          this.hud?.render();
+          break;
+        case 'Digit2':
+          this.fsm.setAction('ATTACK');
+          this.hud?.render();
+          break;
+        case 'Digit3': {
+          const u = this.fsm.getSelectedUnit();
+          if (u?.abilities[0]) {
+            if (u.abilities[0].targetType === 'self') {
+              void this.fsm.executeAbility(u, u.abilities[0], null, { x: u.x, y: u.y });
+            } else {
+              this.fsm.setAction('ABILITY_1');
+              this.hud?.render();
+            }
+          }
+          break;
         }
+        case 'Digit4': {
+          const u = this.fsm.getSelectedUnit();
+          if (u?.abilities[1]) {
+            if (u.abilities[1].targetType === 'self') {
+              void this.fsm.executeAbility(u, u.abilities[1], null, { x: u.x, y: u.y });
+            } else {
+              this.fsm.setAction('ABILITY_2');
+              this.hud?.render();
+            }
+          }
+          break;
+        }
+        case 'KeyH':
+          void this.fsm.executeHackTerminal();
+          break;
+        case 'Space':
+        case 'Enter':
+          e.preventDefault();
+          if (this.fsm.state === 'PLAYER_TURN') {
+            void this.fsm.endTurn();
+          }
+          break;
+        case 'KeyR':
+        case 'Home':
+          this.camera.centerOnGrid(TacticalGrid2D.GRID_WIDTH, TacticalGrid2D.GRID_HEIGHT, TacticalGrid2D.TILE_SIZE);
+          break;
+      }
+    });
+
+    window.addEventListener('keyup', (e: KeyboardEvent) => {
+      switch (e.code) {
+        case 'KeyW':
+        case 'ArrowUp':
+          this.camera.keys.up = false;
+          break;
+        case 'KeyS':
+        case 'ArrowDown':
+          this.camera.keys.down = false;
+          break;
+        case 'KeyA':
+        case 'ArrowLeft':
+          this.camera.keys.left = false;
+          break;
+        case 'KeyD':
+        case 'ArrowRight':
+          this.camera.keys.right = false;
+          break;
       }
     });
   }
 
-  private updatePointerCoords(event: PointerEvent) {
-    this.pointer.x = (event.clientX / window.innerWidth) * 2 - 1;
-    this.pointer.y = -(event.clientY / window.innerHeight) * 2 + 1;
-  }
+  private gameLoop(now: number) {
+    const delta = Math.min(0.1, (now - this.lastTime) / 1000);
+    this.lastTime = now;
 
-  /**
-   * Performs direct raycast against interactive tile meshes and unit meshes.
-   * When pointer lock is active, aims straight down the center reticle.
-   */
-  private getGridCoordUnderPointer(): GridCoord | null {
-    if (!xb.core.camera || this.grid.interactiveTileMeshes.length === 0) return null;
+    // 1. Update camera movement
+    this.camera.update(delta);
 
-    // In pointer lock mode, raycast from the exact center (crosshair)
-    const raycastPointer = this.freeCam.isPointerLocked
-      ? FreeCameraController.CENTER_POINTER
-      : this.pointer;
+    // 2. Update visual effects
+    this.renderer.updateFX(delta);
 
-    this.raycaster.setFromCamera(raycastPointer, xb.core.camera);
+    // 3. Render 2D Frame
+    this.renderer.render(this.fsm.units, this.fsm.getSelectedUnit());
 
-    // First check if an interactive tile mesh was hit
-    const intersects = this.raycaster.intersectObjects(this.grid.interactiveTileMeshes, false);
-    if (intersects.length > 0) {
-      const hit = intersects[0];
-      const gx = hit.object.userData.gridX;
-      const gz = hit.object.userData.gridZ;
-      if (typeof gx === 'number' && typeof gz === 'number') {
-        return { x: gx, z: gz };
-      }
-    }
-
-    // Fallback: check unit mesh hits
-    const unitIntersects = this.raycaster.intersectObjects(this.unitMeshesGroup.children, true);
-    if (unitIntersects.length > 0) {
-      let obj: THREE.Object3D | null = unitIntersects[0].object;
-      while (obj && obj !== this.unitMeshesGroup) {
-        if (obj.userData?.unitId) {
-          const unit = this.fsm.units.find((u) => u.id === obj!.userData.unitId);
-          if (unit) return { x: unit.x, z: unit.z };
-        }
-        obj = obj.parent;
-      }
-    }
-
-    return null;
-  }
-
-  private handleHover() {
-    if (this.isTitleScreen || this.fsm.state !== 'PLAYER_TURN') return;
-
-    const coord = this.getGridCoordUnderPointer();
-    this.grid.setHoverTile(coord);
-
-    // Update crosshair telemetry readout if in mouse-look mode
-    if (this.freeCam.isPointerLocked) {
-      if (coord) {
-        const unitAtTile = this.fsm.units.find((u) => u.x === coord.x && u.z === coord.z && !u.isDead);
-        if (unitAtTile) {
-          const teamLabel = unitAtTile.team === 'enemy' ? 'HOSTILE' : 'SQUAD';
-          this.freeCam.setCrosshairTargetText(
-            `[${teamLabel}: ${unitAtTile.name.toUpperCase()} | HP: ${unitAtTile.hp}/${unitAtTile.maxHp}]`
-          );
-        } else {
-          const tile = this.grid.gridTiles.get(`${coord.x},${coord.z}`);
-          const typeLabel = tile ? tile.type.toUpperCase() : 'SECTOR';
-          this.freeCam.setCrosshairTargetText(`[TILE: ${coord.x},${coord.z} // ${typeLabel}]`);
-        }
-      } else {
-        this.freeCam.setCrosshairTargetText(null);
-      }
-    }
-
-    const activeUnit = this.fsm.getSelectedUnit();
-    if (activeUnit && this.fsm.currentAction === 'MOVE' && coord) {
-      const reachable = Pathfinding.getReachableTiles(
-        { x: activeUnit.x, z: activeUnit.z },
-        activeUnit.ap,
-        activeUnit.moveRange,
-        this.fsm.grid.gridTiles,
-        this.fsm.units,
-        activeUnit.id
-      );
-
-      const targetPath = reachable.get(`${coord.x},${coord.z}`);
-      if (targetPath) {
-        this.grid.drawPathPreview(targetPath.path);
-      } else {
-        this.grid.pathLine.visible = false;
-      }
-    } else {
-      this.grid.pathLine.visible = false;
-    }
-  }
-
-  private handleClick() {
-    if (this.isTitleScreen) return;
-    const coord = this.getGridCoordUnderPointer();
-    if (coord) {
-      void this.fsm.handleTileClick(coord);
-    }
-  }
-
-  // WebXR Controller / Hand Interactivity
-  public onSelectStart(event: xb.SelectEvent) {
-    if (this.isTitleScreen) return;
-    const controller = event.source.controller;
-    if (!controller) return;
-
-    const controllerPos = new THREE.Vector3();
-    controller.getWorldPosition(controllerPos);
-    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(controller.quaternion);
-
-    this.raycaster.set(controllerPos, forward);
-    const intersects = this.raycaster.intersectObjects(this.grid.interactiveTileMeshes, false);
-    if (intersects.length > 0) {
-      const hit = intersects[0];
-      const gx = hit.object.userData.gridX;
-      const gz = hit.object.userData.gridZ;
-      if (typeof gx === 'number' && typeof gz === 'number') {
-        void this.fsm.handleTileClick({ x: gx, z: gz });
-      }
-    }
-  }
-
-  public update() {
-    const delta = xb.getDeltaTime?.() ?? 0.016;
-
-    // Update 6-DOF free tactical camera position & orientation
-    if (!xb.core.renderer.xr.isPresenting) {
-      this.freeCam.update(delta);
-
-      // If mouse look is locked, continuously update hover as camera turns
-      if (this.freeCam.isPointerLocked) {
-        this.handleHover();
-      }
-    }
-
-    // Update grid animations
-    this.grid.update(delta);
-
-    // Keep floating vitals billboarded facing camera
-    if (xb.core.camera) {
-      this.fsm.units.forEach((u) => {
-        if (u.healthBarGroup && !u.isDead) {
-          u.healthBarGroup.quaternion.copy(xb.core.camera.quaternion);
-        }
-      });
-    }
+    requestAnimationFrame((t) => this.gameLoop(t));
   }
 }
 
-// Start application
-document.addEventListener('DOMContentLoaded', async () => {
-  const options = new xb.Options();
-  options.setAppTitle('Sci-Fi Tactical Recon');
-  options.setAppDescription(
-    'Turn-based tactical rogue-lite featuring mechs, A* pathfinding, line-of-sight raycasting, and sector campaign traversal in XR.'
-  );
-
-  const scene = new TacticalReconScene();
-  xb.add(scene);
-  await xb.init(options);
-
-  // Disconnect simulator default controls so FreeCameraController has exclusive, seamless control
-  if (xb.core.simulator?.controls) {
-    xb.core.simulator.controls.disconnect();
-  }
+// Launch Game on DOMContentLoaded
+document.addEventListener('DOMContentLoaded', () => {
+  new TacticalReconGame();
 });

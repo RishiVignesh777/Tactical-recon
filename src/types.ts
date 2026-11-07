@@ -1,5 +1,3 @@
-import * as THREE from 'three';
-
 export type Team = 'player' | 'enemy';
 
 export type UnitClass =
@@ -22,9 +20,11 @@ export type TileType =
   | 'elevation'
   | 'extraction';
 
+export type CoverType = 'none' | 'half' | 'full';
+
 export interface GridCoord {
   x: number;
-  z: number;
+  y: number;
 }
 
 export interface Ability {
@@ -52,7 +52,8 @@ export interface Unit {
   team: Team;
   unitClass: UnitClass;
   x: number;
-  z: number;
+  y: number;
+  facingAngle: number; // in radians (0 = right, PI/2 = down, etc.)
   hp: number;
   maxHp: number;
   shields: number;
@@ -66,21 +67,23 @@ export interface Unit {
   critChance: number;
   abilities: Ability[];
   statusEffects: UnitStatus[];
-  mesh?: THREE.Group;
-  healthBarGroup?: THREE.Group;
   isDead: boolean;
   level: number;
   kills: number;
   upgrades: string[];
+  // Interpolated rendering position for smooth movement animations
+  animPos?: { x: number; y: number };
 }
 
 export interface TileData {
   x: number;
-  z: number;
+  y: number;
   type: TileType;
-  height: number;
+  isBlocked: boolean;
+  coverType: CoverType;
   occupiedBy?: string; // unit id
   hacked?: boolean;
+  hazardDamage?: number;
 }
 
 export interface CombatLogEntry {
@@ -155,4 +158,42 @@ export interface ShopItem {
     bonus: number;
   };
   purchased?: boolean;
+}
+
+// 2D Visual FX Structures
+export interface LaserFX {
+  id: string;
+  startX: number;
+  startY: number;
+  targetX: number;
+  targetY: number;
+  color: string;
+  width: number;
+  alpha: number;
+  duration: number;
+  maxDuration: number;
+}
+
+export interface FloatingNumberFX {
+  id: string;
+  x: number; // grid pixel coordinates
+  y: number;
+  text: string;
+  color: string;
+  fontSize: number;
+  alpha: number;
+  life: number;
+  maxLife: number;
+}
+
+export interface ParticleFX {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  color: string;
+  size: number;
+  alpha: number;
+  life: number;
+  maxLife: number;
 }

@@ -1,19 +1,18 @@
-import * as THREE from 'three';
 import { CampaignManager } from '../systems/CampaignManager';
-import { CombatFSM } from '../systems/CombatFSM';
+import { CombatFSM2D } from '../systems/CombatFSM2D';
 import { sound } from '../systems/AudioSynth';
-import { LineOfSight } from '../systems/LineOfSight';
+import { LineOfSight2D } from '../systems/LineOfSight2D';
 import { CombatLogEntry, SelectedAction, Unit } from '../types';
 
 export class TacticalHUD {
   private container: HTMLElement;
-  private fsm: CombatFSM;
+  private fsm: CombatFSM2D;
   private campaign: CampaignManager;
   private isDockCollapsed: boolean = false;
   private onDeployMission?: (nodeId: string) => void;
   public onToggleCam?: () => void;
 
-  constructor(fsm: CombatFSM, campaign: CampaignManager, onDeployMission?: (nodeId: string) => void) {
+  constructor(fsm: CombatFSM2D, campaign: CampaignManager, onDeployMission?: (nodeId: string) => void) {
     this.fsm = fsm;
     this.campaign = campaign;
     this.onDeployMission = onDeployMission;
@@ -27,7 +26,6 @@ export class TacticalHUD {
     this.fsm.onStateChanged = () => this.render();
     this.fsm.onUnitSelected = () => this.render();
     this.fsm.onLogsUpdated = (logs) => this.updateCombatLogs(logs);
-    this.fsm.onFloatingText = (text, color, pos) => this.showFloatingText(text, color, pos);
   }
 
   public render() {
@@ -188,22 +186,24 @@ export class TacticalHUD {
     let canAttack = false;
 
     if (selected) {
-      const evalResult = LineOfSight.evaluateCombat(selected, target, this.fsm.grid.gridTiles);
-      if (evalResult.hasLineOfSight && evalResult.distance <= selected.attackRange) {
-        hitChanceStr = `${evalResult.hitChance}%`;
+      const los = LineOfSight2D.checkLoS(
+        { x: selected.x, y: selected.y },
+        { x: target.x, y: target.y },
+        this.fsm.grid.grid
+      );
+      if (los.hasLoS && los.distance <= selected.attackRange) {
+        hitChanceStr = `${Math.max(15, 85 + los.hitChanceModifier)}%`;
         coverStr =
-          evalResult.coverType === 'high'
-            ? 'High Cover (-50%)'
-            : evalResult.coverType === 'low'
-              ? 'Half Cover (-25%)'
-              : 'Flanked (No Cover)';
+          los.cover === 'half'
+            ? 'Half Cover (-50% DMG, -25% ACC)'
+            : 'Flanked (No Cover)';
         canAttack = selected.ap >= 2 && this.fsm.state === 'PLAYER_TURN' && !this.fsm.isBusyAnimating;
-      } else if (!evalResult.hasLineOfSight) {
+      } else if (!los.hasLoS) {
         hitChanceStr = 'Blocked';
-        coverStr = 'LoS Obstructed';
+        coverStr = 'LoS Obstructed (Full Cover)';
       } else {
         hitChanceStr = 'Out of Range';
-        coverStr = `${Math.round(evalResult.distance)} tiles away (Max: ${selected.attackRange})`;
+        coverStr = `${Math.round(los.distance)} tiles away (Max: ${selected.attackRange})`;
       }
     }
 
@@ -385,14 +385,14 @@ export class TacticalHUD {
 
   private isNearTerminal(unit: Unit): boolean {
     const offsets = [
-      { x: 0, z: 0 },
-      { x: 1, z: 0 },
-      { x: -1, z: 0 },
-      { x: 0, z: 1 },
-      { x: 0, z: -1 },
+      { x: 0, y: 0 },
+      { x: 1, y: 0 },
+      { x: -1, y: 0 },
+      { x: 0, y: 1 },
+      { x: 0, y: -1 },
     ];
     return offsets.some((off) => {
-      const tile = this.fsm.grid.gridTiles.get(`${unit.x + off.x},${unit.z + off.z}`);
+      const tile = this.fsm.grid.getTile(unit.x + off.x, unit.y + off.y);
       return tile && tile.type === 'terminal' && !tile.hacked;
     });
   }
@@ -417,7 +417,7 @@ export class TacticalHUD {
     }
   }
 
-  private showFloatingText(text: string, color: string, worldPos: THREE.Vector3) {
+  private showFloatingText(text: string, color: string) {
     const el = document.createElement('div');
     el.className = 'combat-floating-indicator';
     el.innerText = text;
